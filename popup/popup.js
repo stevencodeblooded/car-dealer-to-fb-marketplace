@@ -117,7 +117,7 @@ function showVehiclePreview(vehicleData) {
     <div class="preview-price">${price}</div>
     ${
       vehicleData.images && vehicleData.images.length > 0
-        ? `<img src="${vehicleData.images[0]}" class="preview-image" alt="${title}">`
+        ? `<img src="${vehicleData.images[0]}" class="preview-image" alt="${title}" onerror="this.src='../assets/no-image.png'">`
         : '<div class="preview-image-placeholder">No image available</div>'
     }
     
@@ -298,7 +298,7 @@ function renderInventory() {
     vehicleCard.innerHTML = `
       ${
         imageUrl
-          ? `<img src="${imageUrl}" class="vehicle-card-image" alt="${title}">`
+          ? `<img src="${imageUrl}" class="vehicle-card-image" alt="${title}" onerror="this.src='../assets/no-image.png'">`
           : '<div class="vehicle-card-image" style="background-color: #f1f1f1;"></div>'
       }
       

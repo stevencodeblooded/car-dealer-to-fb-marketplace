@@ -176,48 +176,44 @@ const Helpers = {
         );
 
         try {
-          // Approach 2: Try with a proxy service
-          const proxyUrl = `https://cors-anywhere.herokuapp.com/${url}`;
-          const proxyResponse = await fetch(proxyUrl);
+          // Approach 2: Try using Image and Canvas
+          const img = new Image();
+          img.crossOrigin = "anonymous";
 
-          if (proxyResponse.ok) {
-            blob = await proxyResponse.blob();
-          } else {
-            throw new Error("Proxy fetch failed");
-          }
-        } catch (proxyError) {
-          console.warn(
-            `Proxy download approach failed for image ${i + 1}:`,
-            proxyError
-          );
-
-          try {
-            // Approach 3: Try using Image and Canvas
-            const img = new Image();
-            img.crossOrigin = "Anonymous";
-
-            await new Promise((resolve, reject) => {
-              img.onload = resolve;
-              img.onerror = reject;
-              img.src = url;
-            });
-
-            const canvas = document.createElement("canvas");
-            canvas.width = img.width;
-            canvas.height = img.height;
-
-            const ctx = canvas.getContext("2d");
-            ctx.drawImage(img, 0, 0);
-
-            blob = await new Promise((resolve) => {
-              canvas.toBlob(resolve, "image/jpeg", 0.85);
-            });
-          } catch (canvasError) {
-            console.error(
-              `Canvas approach also failed for image ${i + 1}:`,
-              canvasError
+          await new Promise((resolve, reject) => {
+            const timeout = setTimeout(
+              () => reject(new Error("Image loading timed out")),
+              10000
             );
-          }
+
+            img.onload = () => {
+              clearTimeout(timeout);
+              resolve();
+            };
+
+            img.onerror = () => {
+              clearTimeout(timeout);
+              reject(new Error("Image loading failed"));
+            };
+
+            img.src = url;
+          });
+
+          const canvas = document.createElement("canvas");
+          canvas.width = img.width || 800; // Fallback if width is 0
+          canvas.height = img.height || 600; // Fallback if height is 0
+
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0);
+
+          blob = await new Promise((resolve) => {
+            canvas.toBlob(resolve, "image/jpeg", 0.85);
+          });
+        } catch (canvasError) {
+          console.error(
+            `Canvas approach also failed for image ${i + 1}:`,
+            canvasError
+          );
         }
       }
 
@@ -239,34 +235,6 @@ const Helpers = {
       const fileName = `vehicle_image_${index + 1}_${Date.now()}.jpg`;
       return new File([blob], fileName, { type: blob.type || "image/jpeg" });
     });
-  },
-
-  /**
-   * Convert array of image URLs to data URLs
-   * @param {Array} imageUrls - Array of image URLs
-   * @returns {Promise<Array>} Array of data URLs
-   */
-  convertToDataUrls: async (imageUrls) => {
-    if (!imageUrls || !imageUrls.length) return [];
-
-    const imagePromises = imageUrls.map((url) =>
-      fetch(url)
-        .then((response) => response.blob())
-        .then((blob) => {
-          return new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result);
-            reader.readAsDataURL(blob);
-          });
-        })
-        .catch((error) => {
-          console.error("Error converting image to data URL:", error);
-          return null;
-        })
-    );
-
-    const dataUrls = await Promise.all(imagePromises);
-    return dataUrls.filter((url) => url !== null);
   },
 
   /**

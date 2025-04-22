@@ -3,6 +3,11 @@
  * Detects and extracts vehicle listing data from AutoTrader.ca pages
  */
 
+// Function to sleep/pause execution
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // Determine if the current page is a vehicle detail page
 function isVehicleDetailPage() {
   // Check for specific elements that indicate a vehicle listing page
@@ -10,6 +15,51 @@ function isVehicleDetailPage() {
     window.location.href.includes("/a/") &&
     document.querySelector(".hero-title") !== null
   );
+}
+
+// Determine if the current page is a search results page
+function isSearchResultsPage() {
+  return (
+    window.location.href.includes("/cars/") || 
+    window.location.href.includes("/search/") || 
+    window.location.href.includes("/results/")
+  );
+}
+
+// Add CSS for the extraction buttons
+function addExtractionButtonsStyle() {
+  const style = document.createElement('style');
+  style.textContent = `
+    .extract-button {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 999;
+      background-color: #4285f4;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: bold;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+      transition: background-color 0.2s ease;
+    }
+    .extract-button:hover {
+      background-color: #3367d6;
+    }
+    .extract-button:active {
+      transform: translateY(1px);
+    }
+    .dealer-split-wrapper {
+      position: relative;
+    }
+  `;
+  document.head.appendChild(style);
 }
 
 // Extract vehicle data from the current page
@@ -51,8 +101,6 @@ function extractVehicleData() {
         vehicleData.make = titleParts[0];
 
         // Extract model (can be multiple words)
-        // For complex cases like "Niro EV" or "F-150 XLT", we need smarter parsing
-        // Here we'll assume make is one word, and the last word might be trim
         if (titleParts.length >= 3) {
           // If we have several words, the last one might be a trim level
           vehicleData.trim = titleParts[titleParts.length - 1];
@@ -247,7 +295,6 @@ function extractVehicleData() {
           case "Horsepower":
             vehicleData.horsepower = valueText;
             break;
-          // Add any other specifications as needed
         }
       }
     });
@@ -302,6 +349,174 @@ function extractVehicleData() {
   }
 }
 
+// Function to add extraction buttons to listing cards
+function addExtractionButtonsToListings() {
+  // Look for all vehicle listing cards
+  const listingCards = document.querySelectorAll(".dealer-split-wrapper");
+
+  if (listingCards.length === 0) {
+    console.log("No listing cards found on this page");
+    return;
+  }
+
+  console.log(
+    `Found ${listingCards.length} vehicle listings, adding extraction buttons`
+  );
+
+  // Add a button to each listing
+  listingCards.forEach((card, index) => {
+    // Check if button already exists
+    if (card.querySelector(".extract-button")) {
+      return;
+    }
+
+    // Find the link to the vehicle detail page
+    const vehicleLink = card.querySelector("a.inner-link");
+    if (!vehicleLink) return;
+
+    // Create extraction button
+    const extractButton = document.createElement("button");
+    extractButton.className = "extract-button";
+    extractButton.innerHTML = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+        <path d="M2 17l10 5 10-5"></path>
+        <path d="M2 12l10 5 10-5"></path>
+      </svg>
+      Extract Vehicle
+    `;
+
+    // Add click handler
+    extractButton.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Store the vehicle URL for later
+      const vehicleUrl = vehicleLink.href;
+
+      // Navigate to the vehicle detail page
+      chrome.storage.local.set(
+        {
+          pendingExtraction: {
+            vehicleUrl,
+            autoOpenFacebook: true,
+          },
+        },
+        () => {
+          window.location.href = vehicleUrl;
+        }
+      );
+    });
+
+    // Add the button to the card
+    card.style.position = "relative";
+    card.appendChild(extractButton);
+  });
+}
+
+// Function to auto-extract and post to Facebook if we're coming from a listing
+function checkPendingExtraction() {
+  chrome.storage.local.get("pendingExtraction", async (result) => {
+    if (
+      result.pendingExtraction &&
+      result.pendingExtraction.vehicleUrl === window.location.href
+    ) {
+      console.log("Auto-extracting vehicle from listing page...");
+
+      // Show notification
+      showNotification("Auto-extracting vehicle data...", "info");
+
+      // Wait a moment for the page to fully load
+      await sleep(2000);
+
+      // Extract vehicle data
+      const vehicleData = extractVehicleData();
+
+      if (vehicleData) {
+        // Show success message
+        showNotification("Vehicle data extracted successfully!", "success");
+
+        // Save vehicle to inventory
+        chrome.runtime.sendMessage(
+          { action: "saveVehicle", vehicleData },
+          (response) => {
+            if (response && response.success) {
+              showNotification("Vehicle saved to inventory", "success");
+
+              // If auto-open is enabled, open Facebook Marketplace
+              if (result.pendingExtraction.autoOpenFacebook) {
+                showNotification("Opening Facebook Marketplace...", "info");
+
+                // Send message to open Facebook
+                chrome.runtime.sendMessage({
+                  action: "postToFacebook",
+                  vehicleId: response.vehicleId,
+                });
+              }
+
+              // Clear the pending extraction
+              chrome.storage.local.remove("pendingExtraction");
+            } else {
+              showNotification("Failed to save vehicle", "error");
+            }
+          }
+        );
+      } else {
+        showNotification("Failed to extract vehicle data", "error");
+      }
+    }
+  });
+}
+
+/**
+ * Show a temporary notification message
+ */
+function showNotification(message, type = "info") {
+  // Create notification element
+  const notification = document.createElement("div");
+
+  // Set style based on notification type
+  let backgroundColor = "#4285f4"; // default blue for info
+  if (type === "success") {
+    backgroundColor = "#0f9d58"; // green
+  } else if (type === "error") {
+    backgroundColor = "#db4437"; // red
+  } else if (type === "warning") {
+    backgroundColor = "#f4b400"; // yellow
+  }
+
+  notification.innerHTML = `
+    <div style="
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background-color: ${backgroundColor};
+      color: white;
+      padding: 12px 20px;
+      border-radius: 4px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+      z-index: 10000;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      font-size: 14px;
+      max-width: 300px;
+      transition: opacity 0.3s ease-in-out;
+    ">
+      ${message}
+    </div>
+  `;
+
+  // Add to page
+  document.body.appendChild(notification);
+
+  // Remove after 3 seconds
+  setTimeout(() => {
+    notification.style.opacity = "0";
+    setTimeout(() => {
+      document.body.removeChild(notification);
+    }, 300);
+  }, 3000);
+}
+
 // Listen for messages from the extension
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log("AutoTrader content script received message:", message);
@@ -322,40 +537,63 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// Automatically check if we're on a vehicle page when the script loads
+// Automatically check if we're on a search results page or vehicle page
 (function () {
-  // Only auto-detect if this is a vehicle detail page
+  // Add extraction buttons if on search results page
+  if (isSearchResultsPage()) {
+    console.log("On search results page, adding extraction buttons");
+    addExtractionButtonsStyle();
+    addExtractionButtonsToListings();
+
+    // Also set up a mutation observer to handle dynamically loaded content
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.addedNodes.length) {
+          addExtractionButtonsToListings();
+        }
+      }
+    });
+
+    // Start observing changes to the DOM
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  // If on vehicle detail page, check for pending extraction or add button
   if (isVehicleDetailPage()) {
+    // Check if we should auto-extract
+    checkPendingExtraction();
+
+    // Otherwise just add the floating button as before
     console.log("AutoTrader vehicle page detected, adding extraction button");
 
     // Create a floating button to extract vehicle data
     const extractButton = document.createElement("div");
     extractButton.innerHTML = `
-     <div style="
-       position: fixed;
-       bottom: 20px;
-       right: 20px;
-       background-color: #4285f4;
-       color: white;
-       padding: 10px 15px;
-       border-radius: 4px;
-       box-shadow: 0 2px 5px rgba(0,0,0,0.3);
-       cursor: pointer;
-       z-index: 9999;
-       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-       font-size: 14px;
-       display: flex;
-       align-items: center;
-       gap: 8px;
-     ">
-       <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-         <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
-         <path d="M2 17l10 5 10-5"></path>
-         <path d="M2 12l10 5 10-5"></path>
-       </svg>
-       Extract Vehicle Data
-     </div>
-   `;
+      <div style="
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background-color: #4285f4;
+        color: white;
+        padding: 10px 15px;
+        border-radius: 4px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        cursor: pointer;
+        z-index: 9999;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        font-size: 14px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      ">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+          <path d="M2 17l10 5 10-5"></path>
+          <path d="M2 12l10 5 10-5"></path>
+        </svg>
+        Extract Vehicle Data
+      </div>
+    `;
 
     // Add click event to extract and save vehicle data
     extractButton.addEventListener("click", () => {
@@ -369,6 +607,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (response && response.success) {
               // Show success message
               showNotification("Vehicle saved to inventory!", "success");
+
+              // Ask if user wants to post to Facebook
+              if (
+                confirm(
+                  "Vehicle saved! Would you like to post it to Facebook Marketplace?"
+                )
+              ) {
+                showNotification("Opening Facebook Marketplace...", "info");
+                chrome.runtime.sendMessage({
+                  action: "postToFacebook",
+                  vehicleId: response.vehicleId,
+                });
+              }
             } else {
               // Show error message
               showNotification("Failed to save vehicle", "error");
@@ -384,52 +635,3 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     document.body.appendChild(extractButton);
   }
 })();
-
-/**
- * Show a temporary notification message
- */
-function showNotification(message, type = "info") {
-  // Create notification element
-  const notification = document.createElement("div");
-
-  // Set style based on notification type
-  let backgroundColor = "#4285f4"; // default blue for info
-  if (type === "success") {
-    backgroundColor = "#0f9d58"; // green
-  } else if (type === "error") {
-    backgroundColor = "#db4437"; // red
-  } else if (type === "warning") {
-    backgroundColor = "#f4b400"; // yellow
-  }
-
-  notification.innerHTML = `
-   <div style="
-     position: fixed;
-     top: 20px;
-     right: 20px;
-     background-color: ${backgroundColor};
-     color: white;
-     padding: 12px 20px;
-     border-radius: 4px;
-     box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-     z-index: 10000;
-     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-     font-size: 14px;
-     max-width: 300px;
-     transition: opacity 0.3s ease-in-out;
-   ">
-     ${message}
-   </div>
- `;
-
-  // Add to page
-  document.body.appendChild(notification);
-
-  // Remove after 3 seconds
-  setTimeout(() => {
-    notification.style.opacity = "0";
-    setTimeout(() => {
-      document.body.removeChild(notification);
-    }, 300);
-  }, 3000);
-}

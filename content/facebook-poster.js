@@ -6,7 +6,7 @@
 // Debugging flag - set to true to see detailed logs
 const DEBUG = true;
 
-// Function to log debuging messages
+// Function to log debugging messages
 function debugLog(...args) {
   if (DEBUG) {
     console.log("[FB Auto-Fill]", ...args);
@@ -288,6 +288,174 @@ async function fillInputField(selectors, value, options = {}) {
 }
 
 /**
+ * Function to select an option from a dropdown
+ * Works with various dropdown implementations
+ */
+async function selectDropdownOption(
+  dropdownSelectors,
+  optionText,
+  options = {}
+) {
+  if (!optionText) {
+    debugLog("No option text to select");
+    return false;
+  }
+
+  try {
+    debugLog("Selecting dropdown option:", optionText);
+
+    // Find dropdown element
+    let dropdown = await findElement(dropdownSelectors);
+    
+    // Try alternative methods if dropdown not found
+    if (!dropdown) {
+      // Try a different approach - look for labels first
+      const labels = document.querySelectorAll("label");
+      for (const label of labels) {
+        if (
+          label.textContent.includes(
+            dropdownSelectors[0]?.replace('[aria-label="', "").replace('"]', "") || ""
+          )
+        ) {
+          // Found label, now look for nearby dropdown
+          const possibleDropdown =
+            label.nextElementSibling ||
+            label.parentElement.querySelector('[role="combobox"]') ||
+            label.parentElement.querySelector("select");
+
+          if (possibleDropdown) {
+            dropdown = possibleDropdown;
+            break;
+          }
+        }
+      }
+
+      // If still not found, try more direct approach
+      if (!dropdown) {
+        // Just try to type the value in any visible input
+        const inputs = document.querySelectorAll('input:not([type="hidden"])');
+        for (const input of inputs) {
+          if (input.offsetParent !== null) {
+            // Check if visible
+            dropdown = input;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!dropdown) {
+      debugLog("Dropdown not found with any approach");
+      return false;
+    }
+
+    // Try to click to open dropdown
+    dropdown.click();
+    await sleep(options.dropdownDelay || 800);
+
+    // Multiple approaches to find dropdown options
+    const optionSelectors = [
+      'div[role="option"]',
+      'li[role="option"]',
+      ".dropdown-option",
+      ".select-option",
+      'div[role="menuitem"]',
+      '[data-testid="dropdown-option"]',
+      // Add more generic selectors that might match options
+      "ul > li",
+      ".menu-item",
+      '[role="listbox"] > *',
+    ];
+
+    // Find all potential options from DOM
+    const allOptions = await findElements(optionSelectors);
+
+    // No options found
+    if (allOptions.length === 0) {
+      console.error("No options found for dropdown");
+
+      // Try direct input if it's an input-based selector
+      if (dropdown.tagName === "INPUT") {
+        debugLog("Attempting to fill dropdown as input field");
+        dropdown.value = optionText;
+        dropdown.dispatchEvent(new Event("input", { bubbles: true }));
+        dropdown.dispatchEvent(new Event("change", { bubbles: true }));
+        await sleep(300);
+
+        // Press Enter key
+        dropdown.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Enter",
+            keyCode: 13,
+            bubbles: true,
+          })
+        );
+        await sleep(300);
+
+        return true;
+      }
+
+      return false;
+    }
+
+    debugLog("Found", allOptions.length, "potential options");
+
+    // Convert option text to lowercase for case-insensitive comparison
+    const targetText = optionText.toString().toLowerCase();
+
+    // Find and click the matching option
+    let optionFound = false;
+
+    for (const option of allOptions) {
+      const text = option.textContent.toLowerCase().trim();
+
+      // Look for exact match or contains match
+      if (text === targetText || text.includes(targetText)) {
+        debugLog("Found matching option:", text);
+        option.click();
+        optionFound = true;
+        await sleep(options.delayAfter || 500);
+        break;
+      }
+    }
+
+    if (!optionFound) {
+      // Try fallback: click dropdown again to close it
+      dropdown.click();
+      await sleep(300);
+
+      // If it's an input element, try to just set the value
+      if (dropdown.tagName === "INPUT") {
+        debugLog("No matching option found, trying direct input");
+        dropdown.value = optionText;
+        dropdown.dispatchEvent(new Event("input", { bubbles: true }));
+        dropdown.dispatchEvent(new Event("change", { bubbles: true }));
+        await sleep(300);
+
+        // Press Tab to try to finalize selection
+        dropdown.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Tab",
+            keyCode: 9,
+            bubbles: true,
+          })
+        );
+
+        return true;
+      }
+
+      console.error("Option not found in dropdown:", optionText);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error("Error selecting dropdown option:", error);
+    return false;
+  }
+}
+
+/**
  * Select the vehicle type in the Facebook form
  */
 async function selectVehicleType() {
@@ -295,8 +463,15 @@ async function selectVehicleType() {
     debugLog("Selecting vehicle type...");
     
     // Look for vehicle type dropdown
+    const vehicleTypeSelectors = [
+      '[aria-label="Vehicle type"]', 
+      '[placeholder="Vehicle type"]',
+      'select[id*="vehicle-type"]',
+      'div[role="button"]'
+    ];
+    
     const vehicleTypeDropdown = await findElement(
-      ['[aria-label="Vehicle type"]', '[placeholder="Vehicle type"]'],
+      vehicleTypeSelectors,
       {
         labelText: "Vehicle type",
         role: "combobox",
@@ -442,99 +617,73 @@ async function uploadImages(imageUrls) {
       try {
         debugLog(`Downloading image ${i + 1}/${maxImages}: ${url}`);
         
-        // Use a Blob URL approach with proxied URL when needed
-        const fetchOptions = {
-          method: "GET",
-          mode: "cors",
-          cache: "no-cache",
-          credentials: "same-origin",
-          redirect: "follow",
-          referrerPolicy: "no-referrer",
-        };
+        // Use base64 data URLs approach
+        const img = new Image();
+        img.crossOrigin = "anonymous";
         
-        // Try direct fetch first
-        let response;
-        try {
-          response = await fetch(url, fetchOptions);
-          if (!response.ok) throw new Error("Direct fetch failed");
-        } catch (err) {
-          // Try with a proxy if direct fetch fails
-          const proxiedUrl = `https://cors-anywhere.herokuapp.com/${url}`;
-          response = await fetch(proxiedUrl, fetchOptions);
+        // Set up a timeout to prevent hanging
+        const imgPromise = new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error("Image loading timed out")), 10000);
+          
+          img.onload = () => {
+            clearTimeout(timeout);
+            const canvas = document.createElement("canvas");
+            canvas.width = img.width || 800; // Set fallback size if width is 0
+            canvas.height = img.height || 600;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0);
+            
+            canvas.toBlob((blob) => {
+              if (blob) {
+                const fileName = `vehicle_image_${i + 1}_${Date.now()}.jpg`;
+                const file = new File([blob], fileName, { type: "image/jpeg" });
+                resolve(file);
+              } else {
+                reject(new Error("Canvas to Blob conversion failed"));
+              }
+            }, "image/jpeg", 0.75); // Lower quality for better compatibility
+          };
+          
+          img.onerror = () => {
+            clearTimeout(timeout);
+            reject(new Error("Image loading failed"));
+          };
+        });
+        
+        // Try loading the image without CORS
+        img.src = url;
+        
+        // If that fails, add a fallback
+        if (img.complete && img.naturalWidth === 0) {
+          throw new Error("Image didn't load properly");
         }
         
-        if (!response.ok) {
-          throw new Error(`Failed to fetch image: ${response.status}`);
-        }
-        
-        const blob = await response.blob();
-        const fileName = `vehicle_image_${i + 1}_${Date.now()}.jpg`;
-        const file = new File([blob], fileName, { type: "image/jpeg" });
+        const file = await imgPromise;
         imageFiles.push(file);
         successCount++;
-        
       } catch (error) {
-        debugLog(`Error downloading image ${i + 1}:`, error.message);
-
-        // Fallback to canvas approach if fetch fails
-        // Modify the image downloading part in uploadImages function:
+        debugLog(`Error with image ${i + 1}:`, error.message);
+        // Try alternative approach with fetch
         try {
-          // Use base64 data URLs instead of trying to fetch the actual images
-          const img = new Image();
-          img.crossOrigin = "anonymous";
-
-          // Set up a timeout to prevent hanging
-          const imgPromise = new Promise((resolve, reject) => {
-            const timeout = setTimeout(
-              () => reject(new Error("Image loading timed out")),
-              10000
-            );
-
-            img.onload = () => {
-              clearTimeout(timeout);
-              const canvas = document.createElement("canvas");
-              canvas.width = img.width || 800; // Set fallback size if width is 0
-              canvas.height = img.height || 600;
-              const ctx = canvas.getContext("2d");
-              ctx.drawImage(img, 0, 0);
-
-              canvas.toBlob(
-                (blob) => {
-                  if (blob) {
-                    const fileName = `vehicle_image_${i + 1}_${Date.now()}.jpg`;
-                    const file = new File([blob], fileName, {
-                      type: "image/jpeg",
-                    });
-                    resolve(file);
-                  } else {
-                    reject(new Error("Canvas to Blob conversion failed"));
-                  }
-                },
-                "image/jpeg",
-                0.75
-              ); // Lower quality for better compatibility
-            };
-
-            img.onerror = () => {
-              clearTimeout(timeout);
-              reject(new Error("Image loading failed"));
-            };
+          debugLog(`Trying fetch approach for image ${i + 1}`);
+          
+          // Attempt direct fetch
+          const response = await fetch(url, {
+            method: "GET",
+            mode: "cors",
+            credentials: "same-origin",
           });
-
-          // Try loading the image without CORS first
-          img.src = url;
-
-          // If that fails, add a fallback
-          if (img.complete && img.naturalWidth === 0) {
-            throw new Error("Image didn't load properly");
-          }
-
-          const file = await imgPromise;
+          
+          if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+          
+          const blob = await response.blob();
+          const fileName = `vehicle_image_${i + 1}_${Date.now()}.jpg`;
+          const file = new File([blob], fileName, { type: "image/jpeg" });
+          
           imageFiles.push(file);
           successCount++;
-        } catch (error) {
-          debugLog(`Error with image ${i + 1}:`, error.message);
-          // Consider adding a placeholder image here
+        } catch (fetchError) {
+          debugLog(`Fetch approach also failed for image ${i + 1}:`, fetchError.message);
         }
       }
     }
@@ -580,196 +729,42 @@ async function uploadImages(imageUrls) {
 }
 
 /**
- * Function to select an option from a dropdown
- * Works with various dropdown implementations
- */
-async function selectDropdownOption(
-  dropdownSelectors,
-  optionText,
-  options = {}
-) {
-  if (!optionText) {
-    debugLog("No option text to select");
-    return false;
-  }
-
-  try {
-    debugLog("Selecting dropdown option:", optionText);
-
-    // Find dropdown element
-    const dropdown = await findElement(dropdownSelectors);
-    // Add this method to selectDropdownOption function:
-    if (!dropdown) {
-      // Try a different approach - look for labels first
-      const labels = document.querySelectorAll("label");
-      for (const label of labels) {
-        if (
-          label.textContent.includes(
-            dropdownSelectors[0].replace('[aria-label="', "").replace('"]', "")
-          )
-        ) {
-          // Found label, now look for nearby dropdown
-          const possibleDropdown =
-            label.nextElementSibling ||
-            label.parentElement.querySelector('[role="combobox"]') ||
-            label.parentElement.querySelector("select");
-
-          if (possibleDropdown) {
-            dropdown = possibleDropdown;
-            break;
-          }
-        }
-      }
-
-      // If still not found, try more direct approach
-      if (!dropdown) {
-        // Just try to type the value in any visible input
-        const inputs = document.querySelectorAll('input:not([type="hidden"])');
-        for (const input of inputs) {
-          if (input.offsetParent !== null) {
-            // Check if visible
-            dropdown = input;
-            break;
-          }
-        }
-      }
-    }
-
-    // Try to click to open dropdown
-    dropdown.click();
-    await sleep(options.dropdownDelay || 800);
-
-    // Multiple approaches to find dropdown options
-    const optionSelectors = [
-      'div[role="option"]',
-      'li[role="option"]',
-      ".dropdown-option",
-      ".select-option",
-      'div[role="menuitem"]',
-      '[data-testid="dropdown-option"]',
-      // Add more generic selectors that might match options
-      "ul > li",
-      ".menu-item",
-      '[role="listbox"] > *',
-    ];
-
-    // Find all potential options from DOM
-    const allOptions = await findElements(optionSelectors);
-
-    // No options found
-    if (allOptions.length === 0) {
-      console.error("No options found for dropdown");
-
-      // Try direct input if it's an input-based selector
-      if (dropdown.tagName === "INPUT") {
-        debugLog("Attempting to fill dropdown as input field");
-        dropdown.value = optionText;
-        dropdown.dispatchEvent(new Event("input", { bubbles: true }));
-        dropdown.dispatchEvent(new Event("change", { bubbles: true }));
-        await sleep(300);
-
-        // Press Enter key
-        dropdown.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            key: "Enter",
-            keyCode: 13,
-            bubbles: true,
-          })
-        );
-        await sleep(300);
-
-        return true;
-      }
-
-      return false;
-    }
-
-    debugLog("Found", allOptions.length, "potential options");
-
-    // Convert option text to lowercase for case-insensitive comparison
-    const targetText = optionText.toString().toLowerCase();
-
-    // Find and click the matching option
-    let optionFound = false;
-
-    for (const option of allOptions) {
-      const text = option.textContent.toLowerCase().trim();
-
-      // Look for exact match or contains match
-      if (text === targetText || text.includes(targetText)) {
-        debugLog("Found matching option:", text);
-        option.click();
-        optionFound = true;
-        await sleep(options.delayAfter || 500);
-        break;
-      }
-    }
-
-    if (!optionFound) {
-      // Try fallback: click dropdown again to close it
-      dropdown.click();
-      await sleep(300);
-
-      // If it's an input element, try to just set the value
-      if (dropdown.tagName === "INPUT") {
-        debugLog("No matching option found, trying direct input");
-        dropdown.value = optionText;
-        dropdown.dispatchEvent(new Event("input", { bubbles: true }));
-        dropdown.dispatchEvent(new Event("change", { bubbles: true }));
-        await sleep(300);
-
-        // Press Tab to try to finalize selection
-        dropdown.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            key: "Tab",
-            keyCode: 9,
-            bubbles: true,
-          })
-        );
-
-        return true;
-      }
-
-      console.error("Option not found in dropdown:", optionText);
-      return false;
-    }
-
-    return true;
-  } catch (error) {
-    console.error("Error selecting dropdown option:", error);
-    return false;
-  }
-}
-
-/**
  * Fill in the entire Facebook Marketplace vehicle listing form
-*/
+ */
 async function fillFacebookListingForm(vehicleData) {
-  let formReady = false;
-  let attempts = 0;
-  while (!formReady && attempts < 20) {
-    // Check for key elements that indicate the form is loaded
-    const formElements = document.querySelectorAll('input, select, [role="combobox"]');
-    if (formElements.length > 5) {
-      formReady = true;
-      debugLog("Form appears to be ready with", formElements.length, "form elements");
-    } else {
-      debugLog("Waiting for form to load...");
-      await sleep(1000);
-      attempts++;
-    }
-  }
-  
-  if (!formReady) {
-    showFloatingStatus("Form didn't load properly. Try refreshing the page.", "error");
-    return false;
-  }
   try {
     debugLog("Starting to fill Facebook form with vehicle data:", vehicleData);
     showFloatingStatus("Starting form fill...");
 
-    // Wait for the form to load
-    await sleep(2000);
+    // Wait for the form to be ready
+    let formReady = false;
+    let attempts = 0;
+    while (!formReady && attempts < 20) {
+      // Check for key elements that indicate the form is loaded
+      const formElements = document.querySelectorAll(
+        'input, select, [role="combobox"]'
+      );
+      if (formElements.length > 5) {
+        formReady = true;
+        debugLog(
+          "Form appears to be ready with",
+          formElements.length,
+          "form elements"
+        );
+      } else {
+        debugLog("Waiting for form to load...");
+        await sleep(1000);
+        attempts++;
+      }
+    }
+
+    if (!formReady) {
+      showFloatingStatus(
+        "Form didn't load properly. Try refreshing the page.",
+        "error"
+      );
+      return false;
+    }
 
     // First, select vehicle type (Car/Truck)
     await selectVehicleType();
@@ -792,34 +787,6 @@ async function fillFacebookListingForm(vehicleData) {
         debugLog("Found Insert Vehicle Data button, clicking it");
         insertDataButton.click();
         await sleep(1500);
-      } else {
-        // Look for vehicle type selector
-        const vehicleType = await findElement([], {
-          ariaLabel: "Vehicle type",
-          role: "combobox",
-          labelText: "Vehicle type",
-        });
-
-        if (vehicleType) {
-          debugLog("Found vehicle type selector, clicking it");
-          vehicleType.click();
-          await sleep(1000);
-
-          // Find options that appear after clicking
-          const options = document.querySelectorAll(
-            '[role="option"], [role="menuitem"], li, .dropdown-item'
-          );
-          debugLog(`Found ${options.length} potential options`);
-
-          for (const option of options) {
-            if (option.textContent.toLowerCase().includes("vehicle")) {
-              debugLog("Found Vehicle option, clicking it");
-              option.click();
-              await sleep(1500);
-              break;
-            }
-          }
-        }
       }
     }
 
@@ -1007,7 +974,7 @@ async function fillFacebookListingForm(vehicleData) {
       'input[aria-label="Title"]',
       'input[placeholder*="Title"]',
       'input[id*="title"]',
-      // Add more generic selectors
+      // More generic selector as fallback
       'input[type="text"]:not([aria-label="Price"])',
     ];
 
@@ -1023,7 +990,7 @@ async function fillFacebookListingForm(vehicleData) {
       'input[placeholder*="Price"]',
       'input[type="number"]',
       'input[id*="price"]',
-      // Add this very generic selector as a last resort
+      // Generic selector as last resort
       'input[type="text"]:not([aria-label="Make"]):not([aria-label="Model"])',
     ];
 
@@ -1042,6 +1009,7 @@ async function fillFacebookListingForm(vehicleData) {
         // Set value directly
         priceInput.value = vehicleData.price.toString().replace(/[^0-9]/g, "");
 
+        // Dispatch events
         // Dispatch events
         priceInput.dispatchEvent(new Event("input", { bubbles: true }));
         priceInput.dispatchEvent(new Event("change", { bubbles: true }));
