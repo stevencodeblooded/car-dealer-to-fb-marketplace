@@ -1,0 +1,19 @@
+vehicle-lister/
+├── manifest.json
+├── popup/
+│   ├── popup.html
+│   ├── popup.css
+│   └── popup.js
+├── content/
+│   ├── autotrader-scraper.js
+│   └── facebook-poster.js
+├── background/
+│   └── background.js
+├── utils/
+│   ├── storage.js
+│   └── helpers.js
+└── assets/
+    ├── icon-16.png
+    ├── icon-48.png
+    ├── icon-128.png
+    └── logo.png
